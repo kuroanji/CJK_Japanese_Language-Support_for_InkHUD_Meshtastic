@@ -1,4 +1,4 @@
-# Add Japanese (CJK) Language Support for InkHUD
+# Add Japanese (CJK) Language Support for InkHUD [Meshtastic devices]
 
 ## Summary
 
