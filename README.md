@@ -10,3 +10,5 @@ InkHUD's 8-bit font encoding (max 255 glyphs) cannot support Japanese, which req
 
 See CJK_IMPLEMENTATION.md for instructions (CJK統合フォントをメッシュタスティックinkHUDデバイスに
 適用する手順).
+
+Merge branch: https://github.com/kuroanji/firmware/tree/CJK_Japanese_support_InkHUD
