@@ -1,6 +1,6 @@
 # Add Japanese (CJK) Language Support for InkHUD [Meshtastic devices]
 
-## New implementation (Unified CJK font with Japanese or Chinese/Korean and Cyrillic support) integrated in InkHUD2: https://github.com/kuroanji/InkHUD2
+New implementation (Unified CJK font with Japanese or Chinese/Korean and Cyrillic support) integrated in InkHUD2: https://github.com/kuroanji/InkHUD2
 
 ## Summary
 
