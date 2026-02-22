@@ -7,7 +7,7 @@ Usage:
 
 Options:
     --var-prefix PREFIX    Variable name prefix (default: CJKFont<cell_size>px)
-    --render-size SIZE     TTF render size in pixels (default: cell_size * 1.4)
+    --render-size SIZE     TTF render size in pixels (default: cell_size * 2)
     --y-offset OFFSET      yOffset value for glyph positioning (default: -cell_size)
     --x-advance ADVANCE    xAdvance value for cursor movement (default: cell_size + 1)
     --max-kanji N          Maximum number of kanji to include (default: all)
@@ -16,6 +16,43 @@ Options:
 import sys
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
+
+
+# Codepoint aliases: map new codepoint to existing one
+# e.g., new Joyo 𠮟 (U+20B9F) -> old form 叱 (U+53F1)
+CODEPOINT_ALIASES = {
+    0x20B9F: 0x53F1,  # 𠮟 -> 叱 (shikaru - new Joyo form to old form)
+}
+
+
+# Punctuation positioning categories
+# Bottom: 、。…‥＿ (comma, period, ellipsis, underscore)
+BOTTOM_PUNCT = {0x3001, 0x3002, 0x2026, 0x2025, 0xFF3F, 0xFF0C, 0xFF0E}
+# Opening brackets (align to right): 「『（【〔〈《
+OPEN_BRACKETS = {0x300C, 0x300E, 0xFF08, 0x3010, 0x3014, 0x3008, 0x300A}
+# Closing brackets (align to left/bottom): 」』）】〕〉》
+CLOSE_BRACKETS = {0x300D, 0x300F, 0xFF09, 0x3011, 0x3015, 0x3009, 0x300B}
+# Top: quotes
+TOP_PUNCT = {0xFF40, 0x201C, 0x2018, 0x201D, 0x2019, 0xFF02, 0xFF07, 0x301D, 0x301E}
+# Center: ー〜・＊；：＝ and most others
+CENTER_PUNCT = {0x30FC, 0x301C, 0x30FB, 0xFF0A, 0xFF1B, 0xFF1A, 0xFF1D, 0xFF0B, 0xFF0D, 0xFF5C}
+
+
+def get_punct_mode(codepoint):
+    """Determine positioning mode for punctuation."""
+    if codepoint in BOTTOM_PUNCT:
+        return 'bottom'
+    elif codepoint in OPEN_BRACKETS:
+        return 'open'
+    elif codepoint in CLOSE_BRACKETS:
+        return 'close'
+    elif codepoint in TOP_PUNCT:
+        return 'top'
+    elif codepoint in CENTER_PUNCT:
+        return 'center'
+    elif 0x3000 <= codepoint <= 0x303F:
+        return 'center'  # Default for other CJK punctuation
+    return None
 
 
 def get_japanese_codepoints(max_kanji=None):
@@ -55,6 +92,10 @@ def get_japanese_codepoints(max_kanji=None):
     for ch in "¢£¥￠￡￥²³×÷¼½¾℃♠♣♥♦♪":
         codepoints.add(ord(ch))
 
+    # Ellipsis (for proper bottom positioning)
+    codepoints.add(0x2026)  # …
+    codepoints.add(0x2025)  # ‥
+
     for cp in range(0xFF65, 0xFFA0):
         codepoints.add(cp)
 
@@ -64,6 +105,9 @@ def get_japanese_codepoints(max_kanji=None):
         kanji_list = kanji_list[:max_kanji]
     for ch in kanji_list:
         codepoints.add(ord(ch))
+
+    # Add old form of 叱 (U+53F1) for alias support (𠮟 -> 叱)
+    codepoints.add(0x53F1)
 
     return sorted(codepoints)
 
@@ -88,7 +132,7 @@ def get_joyo_kanji():
 
 
 def render_glyph(font, codepoint, cell_size, render_size):
-    """Render a single glyph to a fixed-size bitmap cell."""
+    """Render a single glyph to a fixed-size bitmap cell with proper punctuation positioning."""
     char = chr(codepoint)
 
     try:
@@ -98,48 +142,90 @@ def render_glyph(font, codepoint, cell_size, render_size):
     except Exception:
         return None
 
-    img_size = render_size * 3
-    img = Image.new('L', (img_size, img_size), 0)
-    draw = ImageDraw.Draw(img)
-    draw.text((render_size, render_size), char, font=font, fill=255)
+    # Get font metrics
+    ascent, descent = font.getmetrics()
+    punct_mode = get_punct_mode(codepoint)
 
+    # Create canvas
+    canvas_size = render_size * 2
+    img = Image.new('L', (canvas_size, canvas_size), 0)
+    draw = ImageDraw.Draw(img)
+
+    # Draw position depends on punctuation mode
+    draw_x = render_size // 2
+    if punct_mode == 'bottom':
+        draw_y = render_size  # Lower position for bottom punctuation
+    else:
+        draw_y = render_size // 2
+    draw.text((draw_x, draw_y), char, font=font, fill=255, anchor='mm')
+
+    # Find actual bbox
     pixels = img.load()
-    min_x = min_y = img_size
-    max_x = max_y = 0
-    found = False
-    for y in range(img_size):
-        for x in range(img_size):
-            if pixels[x, y] > 64:
-                found = True
+    min_x, min_y, max_x, max_y = canvas_size, canvas_size, 0, 0
+    for y in range(canvas_size):
+        for x in range(canvas_size):
+            if pixels[x, y] > 0:
                 min_x = min(min_x, x)
                 min_y = min(min_y, y)
                 max_x = max(max_x, x)
                 max_y = max(max_y, y)
 
-    if not found:
+    if max_x < min_x:
         return None
 
-    result = Image.new('L', (cell_size, cell_size), 0)
-    actual_w = max_x - min_x + 1
-    actual_h = max_y - min_y + 1
+    glyph_w = max_x - min_x + 1
+    glyph_h = max_y - min_y + 1
 
-    if actual_w > cell_size or actual_h > cell_size:
-        scale = min(cell_size / actual_w, cell_size / actual_h)
-        crop = img.crop((min_x, min_y, max_x + 1, max_y + 1))
-        new_w = max(1, int(actual_w * scale))
-        new_h = max(1, int(actual_h * scale))
-        crop = crop.resize((new_w, new_h), Image.LANCZOS)
-        offset_x = (cell_size - new_w) // 2
-        offset_y = (cell_size - new_h) // 2
-        result.paste(crop, (offset_x, offset_y))
+    # Fixed crop size for consistent scaling
+    crop_size = ascent + 4
+
+    if punct_mode == 'bottom':
+        # Position glyph at bottom of cell
+        cx = (min_x + max_x) // 2
+        crop_left = cx - crop_size // 2
+        crop_top = max_y - crop_size  # Align to bottom edge
+    elif punct_mode == 'top':
+        # Position glyph at top of cell
+        cx = (min_x + max_x) // 2
+        crop_left = cx - crop_size // 2
+        crop_top = min_y - 2
+    elif punct_mode == 'open':
+        # Opening bracket: align to right side of cell
+        crop_left = max_x - crop_size + 6
+        crop_top = min_y - 4
+    elif punct_mode == 'close':
+        # Closing bracket: align to left side of cell
+        crop_left = min_x - 6
+        crop_top = max_y - crop_size + 4
+    elif punct_mode == 'center':
+        # Center the glyph
+        cx = (min_x + max_x) // 2
+        cy = (min_y + max_y) // 2
+        crop_left = cx - crop_size // 2
+        crop_top = cy - crop_size // 2
     else:
-        offset_x = (cell_size - actual_w) // 2
-        offset_y = (cell_size - actual_h) // 2
-        crop = img.crop((min_x, min_y, max_x + 1, max_y + 1))
-        result.paste(crop, (offset_x, offset_y))
+        # Kanji/Kana: tight crop centered on glyph
+        crop_size = max(glyph_w, glyph_h) + 4
+        cx = (min_x + max_x) // 2
+        cy = (min_y + max_y) // 2
+        crop_left = cx - crop_size // 2
+        crop_top = cy - crop_size // 2
 
-    result = result.point(lambda p: 1 if p > 96 else 0, '1')
+    # Ensure bounds
+    crop_left = max(0, crop_left)
+    crop_top = max(0, crop_top)
+    crop_right = min(canvas_size, crop_left + crop_size)
+    crop_bottom = min(canvas_size, crop_top + crop_size)
 
+    crop = img.crop((crop_left, crop_top, crop_right, crop_bottom))
+
+    # Scale to cell_size
+    result = crop.resize((cell_size, cell_size), Image.LANCZOS)
+
+    # Threshold
+    result = result.point(lambda p: 1 if p > 64 else 0, '1')
+
+    # Pack to bytes
     bitmap = []
     byte_val = 0
     bit = 7
@@ -208,7 +294,8 @@ def generate_font_header(ttf_path, cell_size, render_size, output_path, var_pref
     with open(output_path, 'w') as f:
         f.write(f"// Auto-generated CJK bitmap font: {cell_size}px cell, {render_size}px render\n")
         f.write(f"// Source: {Path(ttf_path).name}\n")
-        f.write(f"// Glyphs: {len(glyphs)} ({kanji_count} kanji), Bitmap: {len(bitmap_data)} bytes\n\n")
+        f.write(f"// Glyphs: {len(glyphs)} ({kanji_count} kanji), Bitmap: {len(bitmap_data)} bytes\n")
+        f.write(f"// Features: Punctuation positioning, codepoint aliases\n\n")
         f.write("#pragma once\n\n")
         f.write("#include \"graphics/niche/Fonts/CJK/CJKFont.h\"\n\n")
 
@@ -232,7 +319,23 @@ def generate_font_header(ttf_path, cell_size, render_size, output_path, var_pref
         f.write(f"    {cell_size},    // height\n")
         f.write(f"    {x_advance},    // xAdvance\n")
         f.write(f"    {y_offset},     // yOffset\n")
-        f.write("};\n")
+        f.write("};\n\n")
+
+        # Write codepoint aliases
+        if CODEPOINT_ALIASES:
+            f.write("// Codepoint aliases: map unsupported codepoints to existing glyphs\n")
+            f.write("// Used for characters like 𠮟 (U+20B9F) which should display as 叱 (U+53F1)\n")
+            f.write("struct CJKAlias {\n")
+            f.write("    uint32_t from;  // Requested codepoint\n")
+            f.write("    uint32_t to;    // Codepoint to use instead\n")
+            f.write("};\n\n")
+            f.write(f"const CJKAlias {var_prefix}Aliases[] PROGMEM = {{\n")
+            for from_cp, to_cp in CODEPOINT_ALIASES.items():
+                from_char = chr(from_cp) if from_cp < 0x10000 else f"U+{from_cp:05X}"
+                to_char = chr(to_cp)
+                f.write(f"    {{ 0x{from_cp:05X}, 0x{to_cp:04X} }},  // {from_char} -> {to_char}\n")
+            f.write("};\n")
+            f.write(f"const uint16_t {var_prefix}AliasCount = {len(CODEPOINT_ALIASES)};\n")
 
     print(f"  Written: {output_path}")
 
@@ -247,7 +350,7 @@ def main():
     output_path = sys.argv[3]
 
     var_prefix = f"CJKFont{cell_size}px"
-    render_size = int(cell_size * 1.4)
+    render_size = int(cell_size * 2)  # Increased for better quality
     y_offset = -cell_size
     x_advance = cell_size + 1
     max_kanji = None
